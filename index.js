@@ -1,56 +1,80 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
+const express = require('express');
 
 const token = process.env.BOT_TOKEN;
 const targetChatId = process.env.TARGET_CHAT_ID;
-const sourceChatId = process.env.SOURCE_CHAT_ID;
 
 // Create a bot that uses 'polling' to fetch new updates
 const bot = new TelegramBot(token, { polling: true });
+const app = express();
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 console.log('Bot started. Waiting for messages...');
 
+// Barcha xabarlarni qayta ishlash funksiyasi
+function processAndSendText(text, source) {
+    if (!text) return;
+    
+    let processedText = text;
+    // If the text contains "Ost:", split it and take the first part
+    if (processedText.includes('Ost:')) {
+        processedText = processedText.split('Ost:')[0].trim();
+        console.log(`Text processed (Ost: removed). Source: ${source}`);
+    }
+
+    // Send the processed text to the target group
+    if (targetChatId) {
+        bot.sendMessage(targetChatId, processedText)
+            .then(() => {
+                console.log(`Message successfully sent to target chat: ${targetChatId}`);
+            })
+            .catch((error) => {
+                console.error('Error sending message to target chat:', error.message);
+            });
+    } else {
+        console.log('TARGET_CHAT_ID is not configured.');
+    }
+}
+
+// 1. Telegram orqali kelgan xabarlarni ushlash (Manual test uchun)
 bot.on('message', (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
 
-    // Log the incoming message details for debugging
     console.log(`Received message from chat ID: ${chatId}`);
 
-    // If we only want to process messages from a specific source (like Macrodroid)
-    // and if there's text in the message
-    if ((!sourceChatId || chatId.toString() === sourceChatId.toString()) && text) {
-        let processedText = text;
-
-        // If the text contains "Ost:", split it and take the first part
-        if (processedText.includes('Ost:')) {
-            processedText = processedText.split('Ost:')[0].trim();
-            console.log('Text processed (Ost: removed).');
+    if (text) {
+        processAndSendText(text, 'Telegram Chat');
+        // Agar o'zi yozgan bo'lsa, test uchun tasdiq yuborish
+        if (chatId.toString() !== targetChatId.toString()) {
+            bot.sendMessage(chatId, "✅ Xabar muvaffaqiyatli qirqildi va guruhga yuborildi!");
         }
+    }
+});
 
-        // Send the processed text to the target group
-        if (targetChatId) {
-            bot.sendMessage(targetChatId, processedText)
-                .then(() => {
-                    console.log(`Message successfully sent to target chat: ${targetChatId}`);
-                })
-                .catch((error) => {
-                    console.error('Error sending message to target chat:', error.message);
-                    bot.sendMessage(chatId, `Guruhga xabar yuborishda xatolik yuz berdi: ${error.message}\nIltimos, guruh ID sini to'g'riligini va bot guruhda admin ekanligini tekshiring.`);
-                });
-        } else {
-            console.log('TARGET_CHAT_ID is not configured.');
-        }
+// 2. Macrodroid HTTP Webhook orqali yuborgan xabarlarni ushlash
+app.all('/macrodroid', (req, res) => {
+    // Macrodroid POST yoki GET orqali 'text' parametrida xabarni jo'natadi
+    const text = req.body.text || req.query.text;
+    
+    if (text) {
+        processAndSendText(text, 'Macrodroid Webhook');
+        res.status(200).send('Xabar qabul qilindi va guruhga yuborildi');
     } else {
-        // Option to just debug if it's from another chat
-        if (chatId.toString() !== sourceChatId.toString()) {
-            console.log(`Ignored message from unauthorized chat ID: ${chatId}`);
-            bot.sendMessage(chatId, `Sizning Chat ID raqamingiz: ${chatId}\nBu ID .env faylida SOURCE_CHAT_ID yoki TARGET_CHAT_ID sifatida ishlatilishi mumkin.`);
-        }
+        res.status(400).send('Xabar matni topilmadi (text parametri kerak)');
     }
 });
 
 // Handle polling errors
 bot.on('polling_error', (error) => {
     console.log(`Polling error: ${error.code} - ${error.message}`);
+});
+
+// Express serverni ishga tushirish (24/7 ishlashi uchun kerak bo'ladi)
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Express server running on port ${PORT}`);
 });
