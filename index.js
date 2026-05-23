@@ -44,14 +44,17 @@ bot.on('message', (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
 
+    // Agar xabar guruhning o'zida yozilgan bo'lsa, uni ignor qilish (qaytarib yubormaslik uchun)
+    if (chatId.toString() === targetChatId.toString()) {
+        return;
+    }
+
     console.log(`Received message from chat ID: ${chatId}`);
 
     if (text) {
         processAndSendText(text, 'Telegram Chat');
         // Agar o'zi yozgan bo'lsa, test uchun tasdiq yuborish
-        if (chatId.toString() !== targetChatId.toString()) {
-            bot.sendMessage(chatId, "✅ Xabar muvaffaqiyatli qirqildi va guruhga yuborildi!");
-        }
+        bot.sendMessage(chatId, "✅ Xabar muvaffaqiyatli qirqildi va guruhga yuborildi!");
     }
 });
 
