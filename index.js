@@ -18,6 +18,12 @@ console.log('Bot started. Waiting for messages...');
 function processAndSendText(text, source) {
     if (!text) return;
     
+    // QATIY SHART: Xabar albatta "Postupil" bilan boshlanishi kerak, bo'lmasa ignor qilinadi
+    if (!text.trim().startsWith('Postupil')) {
+        console.log(`Ignored message from ${source}: Doesn't start with 'Postupil'.`);
+        return;
+    }
+    
     let processedText = text;
     // If the text contains "Ost:", split it and take the first part
     if (processedText.includes('Ost:')) {
