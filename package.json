@@ -1,0 +1,16 @@
+{
+  "name": "sms-bot-citric",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
