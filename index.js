@@ -39,23 +39,17 @@ function processAndSendText(text, source) {
     }
 }
 
-// 1. Telegram orqali kelgan xabarlarni ushlash (Manual test uchun)
+// 1. Telegram orqali kelgan xabarlarni ushlash (Manual xabarlar ignor qilinadi)
 bot.on('message', (msg) => {
     const chatId = msg.chat.id;
-    const text = msg.text;
 
-    // Agar xabar guruhning o'zida yozilgan bo'lsa, uni ignor qilish (qaytarib yubormaslik uchun)
+    // Agar xabar guruhning o'zida yozilgan bo'lsa, uni ignor qilish
     if (chatId.toString() === targetChatId.toString()) {
         return;
     }
 
-    console.log(`Received message from chat ID: ${chatId}`);
-
-    if (text) {
-        processAndSendText(text, 'Telegram Chat');
-        // Agar o'zi yozgan bo'lsa, test uchun tasdiq yuborish
-        bot.sendMessage(chatId, "✅ Xabar muvaffaqiyatli qirqildi va guruhga yuborildi!");
-    }
+    // Botning o'ziga kimdir yozsa ham guruhga yubormaymiz, faqat logda ko'rinadi
+    console.log(`Ignored manual message from chat ID: ${chatId}`);
 });
 
 // 2. Macrodroid HTTP Webhook orqali yuborgan xabarlarni ushlash
