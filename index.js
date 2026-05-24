@@ -59,6 +59,17 @@ function removeFromQueue(id) {
 const bot = new TelegramBot(token, { polling: true });
 const app = express();
 
+// Helper: check if Telegram API is reachable (i.e., internet from server side)
+async function isTelegramReachable() {
+  try {
+    await bot.getMe(); // simple API call, throws if no connectivity
+    return true;
+  } catch (e) {
+    console.warn('Telegram API unreachable – will retry later');
+    return false;
+  }
+}
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -96,6 +107,10 @@ let isProcessing = false;
 async function processQueue() {
     if (isProcessing) return; // Parallel ishlamasligi uchun
     
+    // Do not attempt if Telegram is not reachable (likely no internet)
+    const reachable = await isTelegramReachable();
+    if (!reachable) return;
+
     const queue = loadQueue();
     if (queue.length === 0) return;
 
@@ -168,28 +183,35 @@ app.all('/macrodroid', (req, res) => {
         return res.status(400).send('Xabar matni topilmadi (text parametri kerak)');
     }
 
-    // SMS ni queue'ga qo'shish
+    // Har doim queue'ga qo'shamiz, hatto internet bo'lsa ham
     const smsEntry = addToQueue(text, 'MacroDroid');
 
-    // Darhol yuborishga urinish (internet bo'lsa tez ketadi)
+    // Darhol yuborishga urinish – faqat Telegram reachable bo'lsa
     const processedText = processText(text);
     if (processedText) {
-        sendToTelegram(processedText)
-            .then(() => {
-                removeFromQueue(smsEntry.id);
-                console.log(`[DIRECT] ✅ SMS bevosita yuborildi: ${smsEntry.id}`);
-                res.status(200).send('SMS qabul qilindi va guruhga yuborildi');
-            })
-            .catch((error) => {
-                console.error(`[DIRECT] ❌ Bevosita yuborishda xato, queue'da qoladi: ${error.message}`);
-                res.status(200).send('SMS qabul qilindi va queue ga saqlandi (keyinroq yuboriladi)');
-            });
+        isTelegramReachable().then((ok) => {
+            if (!ok) {
+                // Internet yo'q, qoldiq queue'da qoladi
+                return res.status(200).send('SMS qabul qilindi, lekin internet yoq, keyin yuboriladi');
+            }
+            sendToTelegram(processedText)
+                .then(() => {
+                    removeFromQueue(smsEntry.id);
+                    console.log(`[DIRECT] ✅ SMS bevosita yuborildi: ${smsEntry.id}`);
+                    res.status(200).send('SMS qabul qilindi va guruhga yuborildi');
+                })
+                .catch((error) => {
+                    console.error(`[DIRECT] ❌ Bevosita yuborishda xato, queue'da qoladi: ${error.message}`);
+                    res.status(200).send('SMS qabul qilindi, lekin yuborishda xato – keyin qayta uriniladi');
+                });
+        });
     } else {
         // "Postupil" bilan boshlanmagan — queue'dan o'chirib tashlash
         removeFromQueue(smsEntry.id);
         res.status(200).send('SMS qabul qilindi lekin filtrdan o\'tmadi (Postupil bilan boshlanmagan)');
     }
 });
+        
 
 // ============================
 // 3. Queue holati ko'rish (monitoring uchun)
