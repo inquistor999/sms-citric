@@ -10,23 +10,27 @@ const targetChatId = process.env.TARGET_CHAT_ID;
 // SMS Queue fayli — server restart bo'lsa ham yo'qolmaydi
 const QUEUE_FILE = path.join(__dirname, 'sms_queue.json');
 
-// Queue'ni fayldan o'qish
-function loadQueue() {
+// Yozish vaqtida concurrency muammolarining oldini olish uchun in-memory array ishlatamiz
+let activeQueue = [];
+
+// Boshlang'ich yuklash
+function initQueue() {
     try {
         if (fs.existsSync(QUEUE_FILE)) {
             const data = fs.readFileSync(QUEUE_FILE, 'utf8');
-            return JSON.parse(data);
+            activeQueue = JSON.parse(data);
+            console.log(`[QUEUE] Kutish fayli muvaffaqiyatli yuklandi. Navbatda ${activeQueue.length} ta xabar bor.`);
         }
     } catch (e) {
         console.error('Queue faylini o\'qishda xato:', e.message);
+        activeQueue = [];
     }
-    return [];
 }
 
 // Queue'ni faylga yozish
-function saveQueue(queue) {
+function persistQueue() {
     try {
-        fs.writeFileSync(QUEUE_FILE, JSON.stringify(queue, null, 2), 'utf8');
+        fs.writeFileSync(QUEUE_FILE, JSON.stringify(activeQueue, null, 2), 'utf8');
     } catch (e) {
         console.error('Queue faylini saqlashda xato:', e.message);
     }
@@ -34,7 +38,6 @@ function saveQueue(queue) {
 
 // SMS ni queue'ga qo'shish
 function addToQueue(text, source) {
-    const queue = loadQueue();
     const smsEntry = {
         id: Date.now() + '_' + Math.random().toString(36).substr(2, 5),
         text: text,
@@ -42,17 +45,16 @@ function addToQueue(text, source) {
         receivedAt: new Date().toISOString(),
         attempts: 0
     };
-    queue.push(smsEntry);
-    saveQueue(queue);
-    console.log(`[QUEUE] SMS qo'shildi. Queue hajmi: ${queue.length}. ID: ${smsEntry.id}`);
+    activeQueue.push(smsEntry);
+    persistQueue();
+    console.log(`[QUEUE] SMS qo'shildi. Queue hajmi: ${activeQueue.length}. ID: ${smsEntry.id}`);
     return smsEntry;
 }
 
-// Queue'dan SMS ni o'chirish (muvaffaqiyatli yuborilgandan keyin)
+// Queue'dan SMS ni o'chirish
 function removeFromQueue(id) {
-    const queue = loadQueue();
-    const newQueue = queue.filter(item => item.id !== id);
-    saveQueue(newQueue);
+    activeQueue = activeQueue.filter(item => item.id !== id);
+    persistQueue();
 }
 
 // Create a bot that uses 'polling' to fetch new updates
@@ -72,6 +74,9 @@ async function isTelegramReachable() {
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Queue initialization
+initQueue();
 
 console.log('Bot ishga tushdi. SMS Queue tizimi yoqildi...');
 
@@ -107,17 +112,19 @@ let isProcessing = false;
 async function processQueue() {
     if (isProcessing) return; // Parallel ishlamasligi uchun
     
-    // Do not attempt if Telegram is not reachable (likely no internet)
+    // Telegram reachable ekanini tekshiramiz
     const reachable = await isTelegramReachable();
     if (!reachable) return;
 
-    const queue = loadQueue();
-    if (queue.length === 0) return;
+    if (activeQueue.length === 0) return;
 
     isProcessing = true;
-    console.log(`[QUEUE] ${queue.length} ta SMS navbatda. Yuborilmoqda...`);
+    console.log(`[QUEUE] ${activeQueue.length} ta SMS navbatda. Yuborilmoqda...`);
 
-    for (const smsEntry of queue) {
+    // Array nusxasini olamiz, chunki sikl davomida elementlar o'chadi
+    const queueCopy = [...activeQueue];
+
+    for (const smsEntry of queueCopy) {
         const processedText = processText(smsEntry.text);
         
         if (!processedText) {
@@ -138,16 +145,14 @@ async function processQueue() {
             
         } catch (error) {
             console.error(`[QUEUE] ❌ SMS yuborishda xato (${smsEntry.id}): ${error.message}`);
-            // Xato bo'lsa — queue'da qoladi, keyingi sikl da qayta urinadi
             // attempts sonini oshirish
-            const currentQueue = loadQueue();
-            const idx = currentQueue.findIndex(q => q.id === smsEntry.id);
+            const idx = activeQueue.findIndex(q => q.id === smsEntry.id);
             if (idx !== -1) {
-                currentQueue[idx].attempts += 1;
-                currentQueue[idx].lastAttempt = new Date().toISOString();
-                saveQueue(currentQueue);
+                activeQueue[idx].attempts += 1;
+                activeQueue[idx].lastAttempt = new Date().toISOString();
+                persistQueue();
             }
-            break; // Xato bo'lsa keyingilarni kutish
+            break; // Xato bo'lsa keyingilarni kutishni to'xtatamiz
         }
     }
 
@@ -183,7 +188,7 @@ app.all('/macrodroid', (req, res) => {
         return res.status(400).send('Xabar matni topilmadi (text parametri kerak)');
     }
 
-    // Har doim queue'ga qo'shamiz, hatto internet bo'lsa ham
+    // Har doim queue'ga qo'shamiz, hatto internet bo'lsa ham (concurrency-safe arrayga)
     const smsEntry = addToQueue(text, 'MacroDroid');
 
     // Darhol yuborishga urinish – faqat Telegram reachable bo'lsa
@@ -211,16 +216,14 @@ app.all('/macrodroid', (req, res) => {
         res.status(200).send('SMS qabul qilindi lekin filtrdan o\'tmadi (Postupil bilan boshlanmagan)');
     }
 });
-        
 
 // ============================
 // 3. Queue holati ko'rish (monitoring uchun)
 // ============================
 app.get('/queue', (req, res) => {
-    const queue = loadQueue();
     res.json({
-        queueCount: queue.length,
-        queue: queue
+        queueCount: activeQueue.length,
+        queue: activeQueue
     });
 });
 
