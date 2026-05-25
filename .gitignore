@@ -1,3 +1,11 @@
+# Node modules
 node_modules/
+
+# Environment variables
 .env
+
+# SMS queue fayli — runtime da yaratiladi, git ga kerak emas
 sms_queue.json
+
+# Log fayllar
+*.log

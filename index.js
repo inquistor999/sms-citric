@@ -105,7 +105,7 @@ function sendToTelegram(text) {
 }
 
 // ============================
-// QUEUE PROCESSOR — har 20 soniyada ishga tushadi
+// QUEUE PROCESSOR — har 5 soniyada ishga tushadi
 // ============================
 let isProcessing = false;
 
@@ -140,8 +140,8 @@ async function processQueue() {
             console.log(`[QUEUE] ✅ SMS muvaffaqiyatli yuborildi va queue'dan o'chirildi: ${smsEntry.id}`);
             console.log(`[QUEUE] SMS qabul qilingan vaqt: ${smsEntry.receivedAt}`);
             
-            // Ketma-ketlikda yuborish uchun 1 soniya kutish
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            // Ketma-ketlikda yuborish uchun 500ms kutish
+            await new Promise(resolve => setTimeout(resolve, 500));
             
         } catch (error) {
             console.error(`[QUEUE] ❌ SMS yuborishda xato (${smsEntry.id}): ${error.message}`);
@@ -152,15 +152,16 @@ async function processQueue() {
                 activeQueue[idx].lastAttempt = new Date().toISOString();
                 persistQueue();
             }
-            break; // Xato bo'lsa keyingilarni kutishni to'xtatamiz
+            // Xato bo'lsa ham keyingi SMS ga o'tamiz (break yo'q!)
+            continue;
         }
     }
 
     isProcessing = false;
 }
 
-// Har 20 soniyada queue'ni tekshirish
-setInterval(processQueue, 20000);
+// Har 5 soniyada queue'ni tekshirish
+setInterval(processQueue, 5000);
 
 // Server ishga tushganda ham bir marta tekshirish (restart bo'lsa avvalgi SMS lar yuboriladi)
 setTimeout(processQueue, 3000);
@@ -188,33 +189,23 @@ app.all('/macrodroid', (req, res) => {
         return res.status(400).send('Xabar matni topilmadi (text parametri kerak)');
     }
 
-    // Har doim queue'ga qo'shamiz, hatto internet bo'lsa ham (concurrency-safe arrayga)
+    console.log(`[WEBHOOK] Yangi SMS keldi: "${text.substring(0, 50)}..."`);
+
+    // Filtrdan o'tkazish
+    const processedText = processText(text);
+    if (!processedText) {
+        console.log(`[WEBHOOK] SMS filtrdan o'tmadi (Postupil bilan boshlanmagan)`);
+        return res.status(200).send('SMS qabul qilindi lekin filtrdan o\'tmadi (Postupil bilan boshlanmagan)');
+    }
+
+    // Queue'ga qo'shamiz
     const smsEntry = addToQueue(text, 'MacroDroid');
 
-    // Darhol yuborishga urinish – faqat Telegram reachable bo'lsa
-    const processedText = processText(text);
-    if (processedText) {
-        isTelegramReachable().then((ok) => {
-            if (!ok) {
-                // Internet yo'q, qoldiq queue'da qoladi
-                return res.status(200).send('SMS qabul qilindi, lekin internet yoq, keyin yuboriladi');
-            }
-            sendToTelegram(processedText)
-                .then(() => {
-                    removeFromQueue(smsEntry.id);
-                    console.log(`[DIRECT] ✅ SMS bevosita yuborildi: ${smsEntry.id}`);
-                    res.status(200).send('SMS qabul qilindi va guruhga yuborildi');
-                })
-                .catch((error) => {
-                    console.error(`[DIRECT] ❌ Bevosita yuborishda xato, queue'da qoladi: ${error.message}`);
-                    res.status(200).send('SMS qabul qilindi, lekin yuborishda xato – keyin qayta uriniladi');
-                });
-        });
-    } else {
-        // "Postupil" bilan boshlanmagan — queue'dan o'chirib tashlash
-        removeFromQueue(smsEntry.id);
-        res.status(200).send('SMS qabul qilindi lekin filtrdan o\'tmadi (Postupil bilan boshlanmagan)');
-    }
+    // Darhol response qaytaramiz — MacroDroid kutmasin
+    res.status(200).send(`SMS qabul qilindi va navbatga qo'shildi. ID: ${smsEntry.id}`);
+
+    // Darhol queue processorni ishga tushiramiz (1 soniyadan keyin)
+    setTimeout(processQueue, 1000);
 });
 
 // ============================
