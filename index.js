@@ -120,6 +120,10 @@ async function processGoogleSheets() {
             return;
         }
 
+        // SMS larni vaqti bo'yicha saralash (eng eskisidan yangisiga qarab)
+        // Shunda internet o'chganda yig'ilib qolgan SMS lar ketma-ketlikda yuboriladi
+        smsList.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
         console.log(`📤 ${smsList.length} ta SMS guruhga yuborilmoqda...`);
 
         let sentCount = 0;
