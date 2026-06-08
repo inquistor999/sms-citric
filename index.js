@@ -1,92 +1,50 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
 
 const token = process.env.BOT_TOKEN;
 const targetChatId = process.env.TARGET_CHAT_ID;
+const googleSheetsUrl = process.env.GOOGLE_SHEETS_URL;
 
-// SMS Queue fayli — server restart bo'lsa ham yo'qolmaydi
-const QUEUE_FILE = path.join(__dirname, 'sms_queue.json');
-
-// Yozish vaqtida concurrency muammolarining oldini olish uchun in-memory array ishlatamiz
-let activeQueue = [];
-
-// Boshlang'ich yuklash
-function initQueue() {
-    try {
-        if (fs.existsSync(QUEUE_FILE)) {
-            const data = fs.readFileSync(QUEUE_FILE, 'utf8');
-            activeQueue = JSON.parse(data);
-            console.log(`[QUEUE] Kutish fayli muvaffaqiyatli yuklandi. Navbatda ${activeQueue.length} ta xabar bor.`);
-        }
-    } catch (e) {
-        console.error('Queue faylini o\'qishda xato:', e.message);
-        activeQueue = [];
-    }
-}
-
-// Queue'ni faylga yozish
-function persistQueue() {
-    try {
-        fs.writeFileSync(QUEUE_FILE, JSON.stringify(activeQueue, null, 2), 'utf8');
-    } catch (e) {
-        console.error('Queue faylini saqlashda xato:', e.message);
-    }
-}
-
-// SMS ni queue'ga qo'shish
-function addToQueue(text, source) {
-    const smsEntry = {
-        id: Date.now() + '_' + Math.random().toString(36).substr(2, 5),
-        text: text,
-        source: source,
-        receivedAt: new Date().toISOString(),
-        attempts: 0
-    };
-    activeQueue.push(smsEntry);
-    persistQueue();
-    console.log(`[QUEUE] SMS qo'shildi. Queue hajmi: ${activeQueue.length}. ID: ${smsEntry.id}`);
-    return smsEntry;
-}
-
-// Queue'dan SMS ni o'chirish
-function removeFromQueue(id) {
-    activeQueue = activeQueue.filter(item => item.id !== id);
-    persistQueue();
+// Google Sheets URL tekshirish
+if (!googleSheetsUrl) {
+    console.error('❌ GOOGLE_SHEETS_URL .env faylda topilmadi!');
+    console.error('Google Apps Script Web App URL ni .env faylga qo\'shing.');
+    process.exit(1);
 }
 
 // Create a bot that uses 'polling' to fetch new updates
 const bot = new TelegramBot(token, { polling: true });
 const app = express();
 
-// Helper: check if Telegram API is reachable (i.e., internet from server side)
-async function isTelegramReachable() {
-  try {
-    await bot.getMe(); // simple API call, throws if no connectivity
-    return true;
-  } catch (e) {
-    console.warn('Telegram API unreachable – will retry later');
-    return false;
-  }
-}
-
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Queue initialization
-initQueue();
+console.log('🚀 Bot ishga tushdi. Google Sheets polling tizimi yoqildi...');
+console.log(`📊 Google Sheets URL: ${googleSheetsUrl.substring(0, 60)}...`);
 
-console.log('Bot ishga tushdi. SMS Queue tizimi yoqildi...');
+// ============================
+// Helper: Telegram API ga ulanish tekshirish
+// ============================
+async function isTelegramReachable() {
+    try {
+        await bot.getMe();
+        return true;
+    } catch (e) {
+        console.warn('⚠️ Telegram API unreachable – keyinroq qayta uriniladi');
+        return false;
+    }
+}
 
-// Xabarni qayta ishlash va Telegram guruhga yuborish
+// ============================
+// Xabarni qayta ishlash (Postupil filtri + Ost: ni o'chirish)
+// ============================
 function processText(text) {
     if (!text) return null;
 
     // QATIY SHART: Xabar albatta "Postupil" bilan boshlanishi kerak
     if (!text.trim().startsWith('Postupil')) {
-        console.log(`Ignored: "Postupil" bilan boshlanmagan.`);
+        console.log(`⏭️ Ignored: "Postupil" bilan boshlanmagan.`);
         return null;
     }
 
@@ -99,75 +57,152 @@ function processText(text) {
     return processedText;
 }
 
-// Telegram guruhga yuborish (Promise qaytaradi)
+// ============================
+// Google Sheets dan SMS larni olish va tozalash
+// ============================
+async function fetchAndClearFromGoogleSheets() {
+    try {
+        const url = `${googleSheetsUrl}?action=readAndClear`;
+        const response = await fetch(url, {
+            method: 'GET',
+            redirect: 'follow' // Google Apps Script redirect qiladi
+        });
+
+        if (!response.ok) {
+            console.error(`❌ Google Sheets dan o'qishda xato: HTTP ${response.status}`);
+            return [];
+        }
+
+        const result = await response.json();
+
+        if (result.status === 'success' && result.count > 0) {
+            console.log(`📥 Google Sheets dan ${result.count} ta SMS olindi`);
+            return result.data;
+        }
+
+        return [];
+    } catch (error) {
+        console.error(`❌ Google Sheets ga ulanishda xato: ${error.message}`);
+        return [];
+    }
+}
+
+// ============================
+// Telegram guruhga yuborish
+// ============================
 function sendToTelegram(text) {
     return bot.sendMessage(targetChatId, text);
 }
 
 // ============================
-// QUEUE PROCESSOR — har 5 soniyada ishga tushadi
+// ASOSIY PROCESSOR — Google Sheets dan o'qib, guruhga yuborish
 // ============================
 let isProcessing = false;
 
-async function processQueue() {
+async function processGoogleSheets() {
     if (isProcessing) return; // Parallel ishlamasligi uchun
-    
+
     // Telegram reachable ekanini tekshiramiz
     const reachable = await isTelegramReachable();
-    if (!reachable) return;
-
-    if (activeQueue.length === 0) return;
+    if (!reachable) {
+        console.log('⏳ Telegram unreachable — Google Sheets dagi SMS lar saqlanib qoladi');
+        return;
+    }
 
     isProcessing = true;
-    console.log(`[QUEUE] ${activeQueue.length} ta SMS navbatda. Yuborilmoqda...`);
 
-    // Array nusxasini olamiz, chunki sikl davomida elementlar o'chadi
-    const queueCopy = [...activeQueue];
+    try {
+        // Google Sheets dan barcha SMS larni olish (va Sheet ni tozalash)
+        const smsList = await fetchAndClearFromGoogleSheets();
 
-    for (const smsEntry of queueCopy) {
-        const processedText = processText(smsEntry.text);
-        
-        if (!processedText) {
-            // Yaroqsiz SMS — queue'dan o'chirib tashlash
-            removeFromQueue(smsEntry.id);
-            console.log(`[QUEUE] Yaroqsiz SMS o'chirildi: ${smsEntry.id}`);
-            continue;
+        if (smsList.length === 0) {
+            isProcessing = false;
+            return;
         }
 
-        try {
-            await sendToTelegram(processedText);
-            removeFromQueue(smsEntry.id);
-            console.log(`[QUEUE] ✅ SMS muvaffaqiyatli yuborildi va queue'dan o'chirildi: ${smsEntry.id}`);
-            console.log(`[QUEUE] SMS qabul qilingan vaqt: ${smsEntry.receivedAt}`);
-            
-            // Ketma-ketlikda yuborish uchun 500ms kutish
-            await new Promise(resolve => setTimeout(resolve, 500));
-            
-        } catch (error) {
-            console.error(`[QUEUE] ❌ SMS yuborishda xato (${smsEntry.id}): ${error.message}`);
-            // attempts sonini oshirish
-            const idx = activeQueue.findIndex(q => q.id === smsEntry.id);
-            if (idx !== -1) {
-                activeQueue[idx].attempts += 1;
-                activeQueue[idx].lastAttempt = new Date().toISOString();
-                persistQueue();
+        console.log(`📤 ${smsList.length} ta SMS guruhga yuborilmoqda...`);
+
+        let sentCount = 0;
+        let failedMessages = [];
+
+        for (const sms of smsList) {
+            const processedText = processText(sms.text);
+
+            if (!processedText) {
+                console.log(`⏭️ SMS filtrdan o'tmadi (Postupil bilan boshlanmagan)`);
+                continue;
             }
-            // Xato bo'lsa ham keyingi SMS ga o'tamiz (break yo'q!)
-            continue;
+
+            try {
+                await sendToTelegram(processedText);
+                sentCount++;
+                console.log(`✅ SMS yuborildi [${sms.timestamp}]: "${processedText.substring(0, 50)}..."`);
+
+                // Ketma-ketlikda yuborish uchun 500ms kutish
+                await new Promise(resolve => setTimeout(resolve, 500));
+
+            } catch (error) {
+                console.error(`❌ SMS yuborishda xato: ${error.message}`);
+                // Yuborilmagan SMS ni qayta Google Sheets ga yozamiz
+                failedMessages.push(sms);
+            }
         }
+
+        // Agar yuborilmagan SMS lar bo'lsa — qayta Google Sheets ga yozish
+        if (failedMessages.length > 0) {
+            console.log(`⚠️ ${failedMessages.length} ta SMS yuborilmadi — Google Sheets ga qayta yozilmoqda...`);
+            for (const failedSms of failedMessages) {
+                await writeToGoogleSheets(failedSms.text, failedSms.sender || 'retry');
+            }
+        }
+
+        console.log(`📊 Natija: ${sentCount} ta yuborildi, ${failedMessages.length} ta qayta navbatga qo'shildi`);
+
+    } catch (error) {
+        console.error(`❌ Processor xato: ${error.message}`);
     }
 
     isProcessing = false;
 }
 
-// Har 5 soniyada queue'ni tekshirish
-setInterval(processQueue, 5000);
+// ============================
+// Yuborilmagan SMS larni qayta Google Sheets ga yozish
+// ============================
+async function writeToGoogleSheets(text, sender) {
+    try {
+        const response = await fetch(googleSheetsUrl, {
+            method: 'POST',
+            redirect: 'follow',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                text: text,
+                sender: sender || 'bot-retry'
+            })
+        });
 
-// Server ishga tushganda ham bir marta tekshirish (restart bo'lsa avvalgi SMS lar yuboriladi)
-setTimeout(processQueue, 3000);
+        if (!response.ok) {
+            console.error(`❌ Google Sheets ga yozishda xato: HTTP ${response.status}`);
+        }
+    } catch (error) {
+        console.error(`❌ Google Sheets ga yozishda xato: ${error.message}`);
+    }
+}
 
 // ============================
-// 1. Telegram xabarlarni ushlash (guruh va bot ga yozilganlar ignor)
+// Har 10 soniyada Google Sheets ni tekshirish
+// ============================
+const POLL_INTERVAL = 10000; // 10 soniya
+setInterval(processGoogleSheets, POLL_INTERVAL);
+
+// Server ishga tushganda 5 soniyadan keyin birinchi tekshirish
+setTimeout(processGoogleSheets, 5000);
+
+console.log(`⏰ Google Sheets har ${POLL_INTERVAL / 1000} soniyada tekshiriladi`);
+
+// ============================
+// Telegram xabarlarni ushlash (guruh va bot ga yozilganlar ignor)
 // ============================
 bot.on('message', (msg) => {
     const chatId = msg.chat.id;
@@ -180,9 +215,9 @@ bot.on('message', (msg) => {
 });
 
 // ============================
-// 2. MacroDroid Webhook — SMS qabul qilish
+// MacroDroid Webhook — zaxira endpoint (eski usul ham ishlaydi)
 // ============================
-app.all('/macrodroid', (req, res) => {
+app.all('/macrodroid', async (req, res) => {
     const text = req.body.text || req.query.text;
 
     if (!text) {
@@ -195,27 +230,48 @@ app.all('/macrodroid', (req, res) => {
     const processedText = processText(text);
     if (!processedText) {
         console.log(`[WEBHOOK] SMS filtrdan o'tmadi (Postupil bilan boshlanmagan)`);
-        return res.status(200).send('SMS qabul qilindi lekin filtrdan o\'tmadi (Postupil bilan boshlanmagan)');
+        return res.status(200).send('SMS qabul qilindi lekin filtrdan o\'tmadi');
     }
 
-    // Queue'ga qo'shamiz
-    const smsEntry = addToQueue(text, 'MacroDroid');
+    // Google Sheets ga yozamiz (zaxira yo'l orqali)
+    await writeToGoogleSheets(text, 'MacroDroid-webhook');
 
-    // Darhol response qaytaramiz — MacroDroid kutmasin
-    res.status(200).send(`SMS qabul qilindi va navbatga qo'shildi. ID: ${smsEntry.id}`);
+    res.status(200).send('SMS qabul qilindi va Google Sheets ga yozildi');
 
-    // Darhol queue processorni ishga tushiramiz (1 soniyadan keyin)
-    setTimeout(processQueue, 1000);
+    // Darhol processor ni ishga tushiramiz
+    setTimeout(processGoogleSheets, 2000);
 });
 
 // ============================
-// 3. Queue holati ko'rish (monitoring uchun)
+// Status endpoint — monitoring uchun
 // ============================
-app.get('/queue', (req, res) => {
-    res.json({
-        queueCount: activeQueue.length,
-        queue: activeQueue
-    });
+app.get('/status', async (req, res) => {
+    try {
+        const url = `${googleSheetsUrl}?action=read`;
+        const response = await fetch(url, { method: 'GET', redirect: 'follow' });
+        const result = await response.json();
+
+        res.json({
+            botStatus: 'running',
+            googleSheetsConnected: true,
+            pendingSMS: result.count || 0,
+            pollInterval: `${POLL_INTERVAL / 1000} soniya`,
+            smsList: result.data || []
+        });
+    } catch (error) {
+        res.json({
+            botStatus: 'running',
+            googleSheetsConnected: false,
+            error: error.message
+        });
+    }
+});
+
+// ============================
+// Health check
+// ============================
+app.get('/', (req, res) => {
+    res.send('✅ SMS Bot ishlayapti — Google Sheets rejimida');
 });
 
 // Polling xatolarini ushlash
@@ -226,6 +282,7 @@ bot.on('polling_error', (error) => {
 // Express server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Express server ishga tushdi: port ${PORT}`);
-    console.log(`Queue holati: GET /queue`);
+    console.log(`🌐 Express server ishga tushdi: port ${PORT}`);
+    console.log(`📊 Status: GET /status`);
+    console.log(`💚 Health: GET /`);
 });
