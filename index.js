@@ -137,17 +137,34 @@ async function processGoogleSheets() {
                 continue;
             }
 
-            try {
-                await sendToTelegram(processedText);
-                sentCount++;
-                console.log(`✅ SMS yuborildi [${sms.timestamp}]: "${processedText.substring(0, 50)}..."`);
+            let success = false;
+            let retries = 0;
+            
+            while (!success && retries < 3) {
+                try {
+                    await sendToTelegram(processedText);
+                    success = true;
+                    sentCount++;
+                    console.log(`✅ SMS yuborildi [${sms.timestamp}]: "${processedText.substring(0, 50)}..."`);
 
-                // Ketma-ketlikda yuborish uchun 500ms kutish
-                await new Promise(resolve => setTimeout(resolve, 500));
+                    // Ketma-ketlikda yuborish uchun 2000ms kutish (Telegram limitlariga tushmaslik uchun)
+                    await new Promise(resolve => setTimeout(resolve, 2000));
 
-            } catch (error) {
-                console.error(`❌ SMS yuborishda xato: ${error.message}`);
-                // Yuborilmagan SMS ni qayta Google Sheets ga yozamiz
+                } catch (error) {
+                    if (error.message && error.message.includes('429')) {
+                        const match = error.message.match(/retry after (\d+)/);
+                        const retryAfter = match ? parseInt(match[1], 10) : 30;
+                        console.warn(`⏳ Telegram API blokladi (429). Bot ${retryAfter} soniya kutmoqda...`);
+                        await new Promise(resolve => setTimeout(resolve, (retryAfter * 1000) + 1000));
+                        retries++;
+                    } else {
+                        console.error(`❌ SMS yuborishda xato: ${error.message}`);
+                        break;
+                    }
+                }
+            }
+
+            if (!success) {
                 failedMessages.push(sms);
             }
         }
