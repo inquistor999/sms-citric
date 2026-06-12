@@ -215,12 +215,12 @@ async function writeToGoogleSheets(text, sender) {
 // Har 10 soniyada Google Sheets ni tekshirish
 // ============================
 const POLL_INTERVAL = 10000; // 10 soniya
-setInterval(processGoogleSheets, POLL_INTERVAL);
+// setInterval(processGoogleSheets, POLL_INTERVAL); // VAQTINCHA PAUZA QILINDI
 
 // Server ishga tushganda 5 soniyadan keyin birinchi tekshirish
-setTimeout(processGoogleSheets, 5000);
+// setTimeout(processGoogleSheets, 5000); // VAQTINCHA PAUZA QILINDI
 
-console.log(`⏰ Google Sheets har ${POLL_INTERVAL / 1000} soniyada tekshiriladi`);
+console.log(`⏰ Google Sheets tekshiruvi vaqtincha PAUZADA`);
 
 // ============================
 // Telegram xabarlarni ushlash (guruh va bot ga yozilganlar ignor)
