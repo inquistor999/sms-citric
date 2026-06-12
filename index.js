@@ -42,8 +42,8 @@ async function isTelegramReachable() {
 function processText(text) {
     if (!text) return null;
 
-    // QATIY SHART: Xabar albatta "Postupil" bilan boshlanishi kerak
-    if (!text.trim().startsWith('Postupil')) {
+    // QATIY SHART: Xabar albatta "Postupil" bilan boshlanishi kerak (katta yoki kichik harfligidan qat'iy nazar)
+    if (!text.trim().toLowerCase().startsWith('postupil')) {
         console.log(`⏭️ Ignored: "Postupil" bilan boshlanmagan.`);
         return null;
     }

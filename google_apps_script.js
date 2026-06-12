@@ -24,8 +24,8 @@ function doPost(e) {
     var sender = data.sender || 'Unknown';
     var timestamp = data.time || new Date().toISOString();
     
-    // SMS matnini tekshirish — faqat "Postupil" bilan boshlanganlari
-    if (!text.trim().startsWith('Postupil')) {
+    // SMS matnini tekshirish — faqat "Postupil" bilan boshlanganlari (katta yoki kichik harfligidan qat'iy nazar)
+    if (!text.trim().toLowerCase().startsWith('postupil')) {
       return ContentService.createTextOutput(
         JSON.stringify({ status: 'ignored', reason: 'Postupil bilan boshlanmagan' })
       ).setMimeType(ContentService.MimeType.JSON);
