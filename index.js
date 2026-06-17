@@ -1,27 +1,23 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
 
 // ============================================================
-// КОНФИГ — всё берём из .env
+// НАСТРОЙКИ — берём из Render Environment
 // ============================================================
 const BOT_TOKEN        = process.env.BOT_TOKEN;
 const TARGET_CHAT_ID   = process.env.TARGET_CHAT_ID;
-const GOOGLE_SHEETS_URL = process.env.GOOGLE_SHEETS_URL; // Опционально — только для лога
+const GOOGLE_SHEETS_URL = process.env.GOOGLE_SHEETS_URL;
+const RENDER_URL        = process.env.RENDER_URL;
 const PORT             = process.env.PORT || 3000;
 
-const QUEUE_FILE    = path.join(__dirname, 'sms_queue.json');
-const SYNC_INTERVAL = 30 * 1000; // Каждые 30 секунд проверяем очередь
-
-if (!BOT_TOKEN || !TARGET_CHAT_ID) {
-    console.error('❌ BOT_TOKEN или TARGET_CHAT_ID не найден в .env!');
-    process.exit(1);
-}
+// Проверка обязательных переменных
+if (!BOT_TOKEN)        { console.error('❌ BOT_TOKEN не найден!'); process.exit(1); }
+if (!TARGET_CHAT_ID)   { console.error('❌ TARGET_CHAT_ID не найден!'); process.exit(1); }
+if (!GOOGLE_SHEETS_URL){ console.error('❌ GOOGLE_SHEETS_URL не найден!'); process.exit(1); }
 
 // ============================================================
-// TELEGRAM + EXPRESS
+// ЗАПУСК БОТА И СЕРВЕРА
 // ============================================================
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const app = express();
@@ -31,85 +27,50 @@ app.use(express.urlencoded({ extended: true }));
 console.log('🚀 SMS Bot запускается...');
 
 // ============================================================
-// ОЧЕРЕДЬ — sms_queue.json (локальное хранилище)
+// ЗАЩИТА ОТ ДУБЛЕЙ
+// Храним ID последних 100 отправленных SMS
+// Если такое уже отправляли — пропускаем
 // ============================================================
+const sentMessages = new Set();
 
-/** Загружает очередь из файла */
-function loadQueue() {
-    try {
-        if (!fs.existsSync(QUEUE_FILE)) return [];
-        const raw = fs.readFileSync(QUEUE_FILE, 'utf8');
-        return JSON.parse(raw) || [];
-    } catch (e) {
-        console.error('❌ Очередь повреждена, сбрасываем:', e.message);
-        return [];
+function isDuplicate(text, timestamp) {
+    // Ключ = первые 50 символов текста + время (до минуты)
+    const minute = timestamp ? timestamp.substring(0, 16) : new Date().toISOString().substring(0, 16);
+    const key = text.substring(0, 50) + '|' + minute;
+
+    if (sentMessages.has(key)) {
+        console.log('⚠️ Дубль — пропускаем:', key);
+        return true;
     }
-}
 
-/** Сохраняет очередь в файл */
-function saveQueue(queue) {
-    try {
-        fs.writeFileSync(QUEUE_FILE, JSON.stringify(queue, null, 2), 'utf8');
-    } catch (e) {
-        console.error('❌ Не удалось сохранить очередь:', e.message);
+    sentMessages.add(key);
+
+    // Чистим если накопилось больше 100 записей
+    if (sentMessages.size > 100) {
+        const first = sentMessages.values().next().value;
+        sentMessages.delete(first);
     }
-}
 
-/** Добавляет SMS в очередь */
-function addToQueue(text, sender) {
-    const queue = loadQueue();
-    const entry = {
-        id:        Date.now().toString(),
-        timestamp: new Date().toISOString(),
-        sender:    sender || 'unknown',
-        text:      text,
-        status:    'pending',  // pending | sent | ignored
-    };
-    queue.push(entry);
-    saveQueue(queue);
-    console.log(`📥 SMS в очереди [всего: ${queue.length}]: "${text.substring(0, 40)}..."`);
-    return entry;
-}
-
-/** Обновляет статус SMS в очереди */
-function updateStatus(id, status) {
-    const queue = loadQueue();
-    const idx = queue.findIndex(s => s.id === id);
-    if (idx !== -1) {
-        queue[idx].status = status;
-        saveQueue(queue);
-    }
-}
-
-/** Удаляет отправленные и ignored SMS (оставляет только pending) */
-function cleanQueue() {
-    const queue = loadQueue();
-    const pending = queue.filter(s => s.status === 'pending');
-    saveQueue(pending);
-    if (queue.length !== pending.length) {
-        console.log(`🧹 Очередь очищена: удалено ${queue.length - pending.length} отправленных`);
-    }
+    return false;
 }
 
 // ============================================================
 // ФИЛЬТР SMS
+// Только "Postupil" — обрезаем "Ost:" и всё после
 // ============================================================
-
-/**
- * Проверяет текст SMS:
- * - Должен начинаться с "Postupil" (без учёта регистра)
- * - Обрезает всё после "Ost:"
- * @returns {string|null} — обработанный текст или null если не подходит
- */
 function processText(text) {
     if (!text) return null;
 
-    if (!text.trim().toLowerCase().startsWith('postupil')) {
-        console.log('⏭️  Ignored: не начинается с "Postupil"');
+    // Убираем лишние пробелы
+    text = text.trim();
+
+    // Должен начинаться с "Postupil" (не важно большими или маленькими буквами)
+    if (!text.toLowerCase().startsWith('postupil')) {
+        console.log('⏭️ Пропускаем — не начинается с Postupil');
         return null;
     }
 
-    // Убираем "Ost:" и всё что после
+    // Обрезаем "Ost:" и всё что после
     if (text.includes('Ost:')) {
         text = text.split('Ost:')[0].trim();
     }
@@ -118,196 +79,163 @@ function processText(text) {
 }
 
 // ============================================================
-// ПРОВЕРКА ИНТЕРНЕТА
-// ============================================================
-
-/** Пингует Telegram API — быстрая проверка интернета */
-async function isInternetAvailable() {
-    try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 5000);
-        await fetch('https://api.telegram.org', {
-            method: 'HEAD',
-            signal: controller.signal,
-        });
-        clearTimeout(timer);
-        return true;
-    } catch {
-        return false;
-    }
-}
-
-// ============================================================
 // ОТПРАВКА В TELEGRAM
+// 3 попытки — если не получилось, сдаёмся
 // ============================================================
 async function sendToTelegram(text) {
-    await bot.sendMessage(TARGET_CHAT_ID, text);
-}
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            await bot.sendMessage(TARGET_CHAT_ID, text);
+            console.log(`✅ Отправлено в Telegram: "${text.substring(0, 50)}"`);
+            return true;
 
-// ============================================================
-// ЛОГ В GOOGLE SHEETS (опционально, не критично)
-// Вызывается ПОСЛЕ успешной отправки в Telegram
-// ============================================================
-async function logToSheets(sms) {
-    if (!GOOGLE_SHEETS_URL) return;
-    try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 8000);
-        await fetch(GOOGLE_SHEETS_URL, {
-            method: 'POST',
-            redirect: 'follow',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                text:   sms.processedText,
-                sender: sms.sender,
-                time:   sms.timestamp,
-            }),
-            signal: controller.signal,
-        });
-        clearTimeout(timer);
-    } catch (e) {
-        // Не критично — SMS уже доставлена в Telegram
-        console.warn('⚠️  Google Sheets лог не удался (не критично):', e.message);
-    }
-}
+        } catch (err) {
+            // Telegram говорит "подожди" (rate limit)
+            if (err.message?.includes('429')) {
+                const match   = err.message.match(/retry after (\d+)/);
+                const waitSec = parseInt(match?.[1] || '30') + 1;
+                console.warn(`⏳ Telegram rate limit. Жду ${waitSec} сек...`);
+                await sleep(waitSec * 1000);
 
-// ============================================================
-// СИНХРОНИЗАТОР — главное сердце бота
-// Запускается каждые 30 сек и при получении нового SMS
-// ============================================================
-let isSyncing = false;
-
-async function syncQueue() {
-    if (isSyncing) return; // Не запускаем параллельно
-
-    const queue   = loadQueue();
-    const pending = queue.filter(s => s.status === 'pending');
-
-    if (pending.length === 0) return; // Нечего отправлять
-
-    // Проверяем интернет
-    const online = await isInternetAvailable();
-    if (!online) {
-        console.log(`⏳ Нет интернета. В очереди ждут: ${pending.length} SMS`);
-        return;
-    }
-
-    isSyncing = true;
-    console.log(`📤 Начинаем синхронизацию: ${pending.length} SMS...`);
-
-    // Сортируем по времени — сначала старые
-    pending.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-
-    let sentCount    = 0;
-    let ignoredCount = 0;
-
-    for (const sms of pending) {
-        const processedText = processText(sms.text);
-
-        // SMS не прошёл фильтр
-        if (!processedText) {
-            updateStatus(sms.id, 'ignored');
-            ignoredCount++;
-            continue;
-        }
-
-        // Пробуем отправить (до 3 попыток)
-        let sent = false;
-        for (let attempt = 1; attempt <= 3; attempt++) {
-            try {
-                await sendToTelegram(processedText);
-                updateStatus(sms.id, 'sent');
-                sentCount++;
-
-                // Логируем в Sheets (не ждём результата)
-                logToSheets({ ...sms, processedText });
-
-                console.log(`✅ Отправлено [${sms.timestamp}]: "${processedText.substring(0, 50)}"`);
-                sent = true;
-
-                // Пауза 2 сек — защита от Telegram rate limit (30 msg/сек)
-                await new Promise(r => setTimeout(r, 2000));
-                break;
-
-            } catch (err) {
-                // Telegram rate limit (429) — ждём сколько скажут
-                if (err.message?.includes('429')) {
-                    const match    = err.message.match(/retry after (\d+)/);
-                    const waitSec  = parseInt(match?.[1] || '30') + 1;
-                    console.warn(`⏳ Telegram rate limit. Жду ${waitSec} сек...`);
-                    await new Promise(r => setTimeout(r, waitSec * 1000));
-                } else {
-                    console.error(`❌ Попытка ${attempt}/3 провалилась: ${err.message}`);
-                    await new Promise(r => setTimeout(r, 3000));
-                }
+            } else {
+                console.error(`❌ Попытка ${attempt}/3: ${err.message}`);
+                if (attempt < 3) await sleep(3000);
             }
         }
-
-        // Если не отправили — остаётся pending, попробуем в следующий раз
-        if (!sent) {
-            console.warn(`⚠️  SMS остался в очереди: ${sms.id}`);
-        }
     }
 
-    // Удаляем отправленные и ignored
-    cleanQueue();
-
-    const stillPending = loadQueue().filter(s => s.status === 'pending').length;
-    console.log(`📊 Итог: ✅ ${sentCount} отправлено | ⏭️ ${ignoredCount} проигнорировано | ⏳ ${stillPending} в очереди`);
-
-    isSyncing = false;
+    console.error('❌ Не удалось отправить после 3 попыток');
+    return false;
 }
 
 // ============================================================
-// ENDPOINT: MacroDroid → POST /sms
-// MacroDroid делает локальный запрос — интернет НЕ НУЖЕН
+// ЧИТАЕМ SMS ИЗ GOOGLE SHEETS И УДАЛЯЕМ ИХ
 // ============================================================
-app.post('/sms', (req, res) => {
-    const text   = req.body.text   || req.query.text;
-    const sender = req.body.sender || req.query.sender || 'unknown';
+async function fetchFromSheets() {
+    try {
+        const url      = `${GOOGLE_SHEETS_URL}?action=readAndClear`;
+        const response = await fetchWithTimeout(url, { method: 'GET', redirect: 'follow' }, 15000);
 
-    if (!text) {
-        return res.status(400).json({ error: 'text required' });
+        if (!response.ok) {
+            console.error(`❌ Sheets вернул HTTP ${response.status}`);
+            return [];
+        }
+
+        const result = await response.json();
+
+        if (result.status === 'success' && result.count > 0) {
+            console.log(`📥 Из Sheets получено: ${result.count} SMS`);
+            return result.data;
+        }
+
+        return [];
+
+    } catch (err) {
+        console.error('❌ Ошибка чтения Sheets:', err.message);
+        return [];
+    }
+}
+
+// ============================================================
+// ГЛАВНЫЙ ЦИКЛ — читаем Sheets и шлём в Telegram
+// ============================================================
+let isProcessing = false;
+
+async function processSheets() {
+    // Не запускаем если предыдущий ещё работает
+    if (isProcessing) return;
+    isProcessing = true;
+
+    try {
+        const smsList = await fetchFromSheets();
+        if (smsList.length === 0) {
+            isProcessing = false;
+            return;
+        }
+
+        // Сортируем по времени — старые сначала
+        smsList.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+        console.log(`📤 Обрабатываем ${smsList.length} SMS...`);
+
+        for (const sms of smsList) {
+            // Фильтруем текст
+            const processed = processText(sms.text);
+            if (!processed) continue;
+
+            // Проверяем на дубль
+            if (isDuplicate(processed, sms.timestamp)) continue;
+
+            // Отправляем в Telegram
+            await sendToTelegram(processed);
+
+            // Пауза 2 сек между сообщениями — Telegram не любит спам
+            await sleep(2000);
+        }
+
+    } catch (err) {
+        console.error('❌ Ошибка в processSheets:', err.message);
     }
 
-    console.log(`📨 Новый SMS от MacroDroid (${sender}): "${text.substring(0, 50)}"`);
+    isProcessing = false;
+}
 
-    // Сохраняем локально (работает без интернета!)
-    addToQueue(text, sender);
+// ============================================================
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ============================================================
 
-    // Пробуем отправить сразу (если есть интернет)
-    setTimeout(syncQueue, 1000);
+// Ждать N миллисекунд
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-    res.status(200).json({ status: 'queued', message: 'SMS сохранён в очередь' });
+// fetch с таймаутом — если сервер не отвечает N секунд, прерываем
+async function fetchWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timer      = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(timer);
+        return res;
+    } catch (err) {
+        clearTimeout(timer);
+        throw err;
+    }
+}
+
+// ============================================================
+// ENDPOINTS (адреса для запросов)
+// ============================================================
+
+// Главная страница — просто проверка что бот жив
+app.get('/', (req, res) => {
+    res.send('✅ SMS Bot работает');
 });
 
-// ============================================================
-// STATUS ENDPOINT — для мониторинга
-// ============================================================
+// Статус — можно открыть в браузере и проверить
 app.get('/status', (req, res) => {
-    const queue   = loadQueue();
-    const pending = queue.filter(s => s.status === 'pending');
     res.json({
-        status:   'running',
-        pending:  pending.length,
-        total:    queue.length,
-        syncEvery: `${SYNC_INTERVAL / 1000} сек`,
-        sheetsLog: GOOGLE_SHEETS_URL ? 'включён' : 'выключен',
+        status:      'running',
+        sentCount:   sentMessages.size,
+        isProcessing,
+        time:        new Date().toISOString(),
     });
 });
 
-// Health check
-app.get('/', (req, res) => res.send('✅ SMS Bot работает'));
+// Ручной запуск — можно дёрнуть если хочешь проверить прямо сейчас
+app.get('/run', async (req, res) => {
+    res.json({ status: 'started' });
+    await processSheets();
+});
 
-// ============================================================
-// TELEGRAM: игнорируем входящие сообщения
-// ============================================================
+// Игнорируем входящие сообщения в Telegram
 bot.on('message', (msg) => {
     if (msg.chat.id.toString() !== TARGET_CHAT_ID.toString()) {
-        console.log(`Ignored incoming from chat: ${msg.chat.id}`);
+        console.log(`Ignored message from: ${msg.chat.id}`);
     }
 });
 
+// Ошибки polling — просто логируем, не падаем
 bot.on('polling_error', (err) => {
     console.error(`Polling error: ${err.code} - ${err.message}`);
 });
@@ -315,15 +243,36 @@ bot.on('polling_error', (err) => {
 // ============================================================
 // ЗАПУСК СЕРВЕРА
 // ============================================================
-app.listen(PORT, () => {
-    console.log(`🌐 Сервер запущен: http://localhost:${PORT}`);
-    console.log(`📊 Status: GET http://localhost:${PORT}/status`);
-    console.log(`📨 MacroDroid endpoint: POST http://localhost:${PORT}/sms`);
+app.listen(PORT, async () => {
+    console.log(`🌐 Сервер запущен на порту ${PORT}`);
+    console.log(`📊 Статус: https://sms-citric.onrender.com/status`);
+    console.log(`▶️  Ручной запуск: https://sms-citric.onrender.com/run`);
 
-    // Первая синхронизация через 5 сек после запуска
-    setTimeout(syncQueue, 5000);
+    // Первая проверка Sheets через 5 сек после старта
+    await sleep(5000);
+    await processSheets();
 
-    // Периодическая синхронизация
-    setInterval(syncQueue, SYNC_INTERVAL);
-    console.log(`⏰ Синхронизация каждые ${SYNC_INTERVAL / 1000} сек`);
+    // Проверяем Sheets каждые 10 секунд
+    setInterval(processSheets, 10 * 1000);
+    console.log('⏰ Проверка Sheets каждые 10 сек');
+
+    // --------------------------------------------------------
+    // KEEP-ALIVE — чтобы Render не засыпал (бесплатный план)
+    // Render засыпает если 15 мин нет запросов
+    // Каждые 13 мин пингуем сами себя
+    // --------------------------------------------------------
+    if (RENDER_URL) {
+        setInterval(async () => {
+            try {
+                const res = await fetchWithTimeout(RENDER_URL, {}, 10000);
+                console.log(`🏓 Keep-alive ping → ${res.status} (${new Date().toLocaleTimeString()})`);
+            } catch (err) {
+                console.warn('⚠️ Keep-alive ping не удался:', err.message);
+            }
+        }, 13 * 60 * 1000);
+
+        console.log(`🏓 Keep-alive включён → пингуем ${RENDER_URL} каждые 13 мин`);
+    } else {
+        console.warn('⚠️ RENDER_URL не задан — keep-alive выключен');
+    }
 });
