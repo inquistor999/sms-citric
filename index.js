@@ -255,24 +255,4 @@ app.listen(PORT, async () => {
     // Проверяем Sheets каждые 10 секунд
     setInterval(processSheets, 10 * 1000);
     console.log('⏰ Проверка Sheets каждые 10 сек');
-
-    // --------------------------------------------------------
-    // KEEP-ALIVE — чтобы Render не засыпал (бесплатный план)
-    // Render засыпает если 15 мин нет запросов
-    // Каждые 13 мин пингуем сами себя
-    // --------------------------------------------------------
-    if (RENDER_URL) {
-        setInterval(async () => {
-            try {
-                const res = await fetchWithTimeout(RENDER_URL, {}, 10000);
-                console.log(`🏓 Keep-alive ping → ${res.status} (${new Date().toLocaleTimeString()})`);
-            } catch (err) {
-                console.warn('⚠️ Keep-alive ping не удался:', err.message);
-            }
-        }, 13 * 60 * 1000);
-
-        console.log(`🏓 Keep-alive включён → пингуем ${RENDER_URL} каждые 13 мин`);
-    } else {
-        console.warn('⚠️ RENDER_URL не задан — keep-alive выключен');
-    }
 });
