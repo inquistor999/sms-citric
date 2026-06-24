@@ -306,28 +306,4 @@ app.listen(PORT, () => {
     console.log(`🌐 Express server ishga tushdi: port ${PORT}`);
     console.log(`📊 Status: GET /status`);
     console.log(`💚 Health: GET /`);
-
-    // ============================
-    // Self-ping: Render.com uxlab qolmasligi uchun
-    // Har 13 daqiqada o'ziga ping yuboradi (Render 15 daqiqada uxlaydi)
-    // ============================
-    const RENDER_URL = process.env.RENDER_URL; // Masalan: https://your-app.onrender.com
-    
-    if (RENDER_URL) {
-        const KEEP_ALIVE_INTERVAL = 13 * 60 * 1000; // 13 daqiqa (780000 ms)
-        
-        setInterval(async () => {
-            try {
-                const response = await fetch(RENDER_URL);
-                console.log(`🏓 Keep-alive ping yuborildi → ${response.status} (${new Date().toLocaleTimeString()})`);
-            } catch (error) {
-                console.warn(`⚠️ Keep-alive ping xato: ${error.message}`);
-            }
-        }, KEEP_ALIVE_INTERVAL);
-        
-        console.log(`🏓 Keep-alive yoqildi: har 13 daqiqada ${RENDER_URL} ga ping yuboriladi`);
-    } else {
-        console.warn('⚠️ RENDER_URL .env da topilmadi — keep-alive o\'chirilgan');
-        console.warn('   .env faylga qo\'shing: RENDER_URL=https://your-app.onrender.com');
-    }
 });
